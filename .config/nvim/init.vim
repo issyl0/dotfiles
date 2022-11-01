@@ -2,11 +2,9 @@ let mapleader = ','
 
 call plug#begin('~/.vim/plugged')
   Plug 'airblade/vim-gitgutter'
-  Plug 'arcticicestudio/nord-vim'
   Plug 'ervandew/supertab'
   Plug 'fatih/vim-go', { 'do': ':GoUpdateBinaries' }
   Plug 'github/copilot.vim'
-  Plug 'hashivim/vim-terraform'
   Plug 'jremmen/vim-ripgrep'
   Plug 'kyazdani42/nvim-web-devicons'
   Plug 'miyakogi/conoline.vim'
@@ -94,8 +92,6 @@ let g:clipboard.paste["*"] = ["rdm", "paste"]
 nmap <leader>f :set hlsearch<cr>:Rg<space>
 nmap <leader>n :NERDTreeToggle<CR>
 nmap <Leader>r :NERDTreeFocus<cr> \| R
-
-colorscheme nord
 
 set background=dark
 set tabstop=2
