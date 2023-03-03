@@ -8,7 +8,8 @@ export SSH_AUTH_SOCK=$(gpgconf --list-dirs agent-ssh-socket)
 gpgconf --launch gpg-agent
 
 export LANG=en_US.UTF-8
-export EDITOR="nvim"
+export EDITOR="code -w"
+export GIT_EDITOR="code -w"
 
 export HOMEBREW_DEVELOPER=1
 export HOMEBREW_GITHUB_USER=issyl0
