@@ -22,7 +22,7 @@ autosquash = true
 [user]
 name = Issy Long
 email = me@issyl0.co.uk
-signingkey = D7A02ABD000655457AECAF6A8247C390DADC67D4
+	signingkey = ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEjjtg6DNmdyjLGToh2BkMnaTiGzqiSq4QXe1vTFlfvN
 [includeIf "gitdir:~/repos/github/"]
 path = .gitconfig-github
 
@@ -31,3 +31,15 @@ clean = git-lfs clean -- %f
 smudge = git-lfs smudge -- %f
 process = git-lfs filter-process
 required = true
+[credential]
+	username = issyl0
+[gpg]
+	format = ssh
+[gpg "ssh"]
+	program = /Applications/1Password.app/Contents/MacOS/op-ssh-sign
+[credential "https://github.com"]
+	helper = 
+	helper = !/opt/homebrew/bin/gh auth git-credential
+[credential "https://gist.github.com"]
+	helper = 
+	helper = !/opt/homebrew/bin/gh auth git-credential
