@@ -11,6 +11,9 @@ else
   echo "==> installing dotfiles in codespace"
   sudo apt-get update
   sudo apt install -y -o Dpkg::Options::="--force-overwrite" bat
+  curl -sS https://starship.rs/install.sh | sh
+
+  sudo chsh "$(id -un)" --shell "/usr/bin/zsh"
 fi
 
 ln -sf $(pwd)/.gitignore_global $HOME/.gitignore_global
@@ -22,6 +25,9 @@ else
   git config --file ~/.gitconfig --unset user.email
   git config --file ~/.gitconfig --unset user.signingkey
   git config --file ~/.gitconfig --unset gpg.program
+
+  ATUIN_HOST_NAME="codespace/$GITHUB_REPOSITORY"
+  ATUIN_HOST_USER=$GITHUB_USER
 fi
 
 if [ -d "/workspaces/github" ]; then
