@@ -15,7 +15,6 @@ fi
 
 ln -sf $(pwd)/.gitignore_global $HOME/.gitignore_global
 ln -sf $(pwd)/.gitconfig $HOME/.gitconfig
-ln -sf $(pwd)/.gitconfig-github $HOME/.gitconfig-github
 
 if [[ -z "${CODESPACES}" ]]; then
   echo "not on Codespaces, don't need to unset git config for GPG signing"
@@ -26,5 +25,6 @@ else
 fi
 
 if [ -d "/workspaces/github" ]; then
+  git config --file ~/.gitconfig user.email "issyl0@github.com"
   git -C /workspaces/github config gpg.program /.codespaces/bin/gh-gpgsign
 fi
