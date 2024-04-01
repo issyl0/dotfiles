@@ -1,0 +1,29 @@
+dialect = "uk"
+timezone = "local"
+auto_sync = true
+update_check = true
+sync_address = "https://history.infra.issylong.com"
+sync_frequency = "2m"
+search_mode = "fuzzy"
+filter_mode = "host"
+workspaces = false
+filter_mode_shell_up_key_binding = "global"
+search_mode_shell_up_key_binding = "fuzzy"
+style = "compact"
+inline_height = 5
+invert = false
+show_preview = true
+exit_mode = "return-original"
+word_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+show_help = true
+show_tabs = true
+enter_accept = true
+keymap_mode = "vim-normal"
+prefers_reduced_motion = true
+secrets_filter = true
+
+[sync]
+records = true
+
+[keys]
+scroll_exits = false

@@ -11,13 +11,17 @@ else
   echo "==> installing dotfiles in codespace"
   sudo apt-get update
   sudo apt install -y -o Dpkg::Options::="--force-overwrite" bat
-  curl -sS https://starship.rs/install.sh | sh
 
-  sudo chsh "$(id -un)" --shell "/usr/bin/zsh"
+  sudo chsh "$(whoami)" -s "/usr/bin/zsh"
+  bash <(curl --proto '=https' --tlsv1.2 -sSf https://setup.atuin.sh)
 fi
 
 ln -sf $(pwd)/.gitignore_global $HOME/.gitignore_global
 ln -sf $(pwd)/.gitconfig $HOME/.gitconfig
+ln -sf $(pwd)/.zshrc $HOME/.zshrc
+
+mkdir -p $HOME/.config/atuin
+ln -sf $(pwd)/atuin-config.toml $HOME/.config/atuin/config.toml
 
 if [[ -z "${CODESPACES}" ]]; then
   echo "not on Codespaces, don't need to unset git config for GPG signing"
@@ -26,8 +30,10 @@ else
   git config --file ~/.gitconfig --unset user.signingkey
   git config --file ~/.gitconfig --unset gpg.program
 
-  ATUIN_HOST_NAME="codespace/$GITHUB_REPOSITORY"
-  ATUIN_HOST_USER=$GITHUB_USER
+  export ATUIN_HOST_NAME="codespaces/$GITHUB_REPOSITORY"
+  export ATUIN_HOST_USER=$GITHUB_USER
+
+  atuin login -u $GITHUB_USER -p $ATUIN_PASSWORD -k $ATUIN_KEY
 fi
 
 if [ -d "/workspaces/github" ]; then

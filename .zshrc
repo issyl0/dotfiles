@@ -16,8 +16,6 @@ export HOMEBREW_GITHUB_USER=issyl0
 export HOMEBREW_NO_AUTO_UPDATE=1
 export HOMEBREW_NO_ANALYTICS=1
 
-export STARSHIP_CONFIG=~/.config/starship.toml
-
 bindkey "^A" vi-beginning-of-line
 bindkey "^E" vi-end-of-line
 
@@ -38,8 +36,10 @@ if type brew &>/dev/null; then
 
   autoload -Uz compinit
   compinit
+
+  export STARSHIP_CONFIG=~/.config/starship.toml
+  eval "$(starship init zsh)"
 fi
 
 eval "$(rbenv init -)"
 eval "$(atuin init zsh)"
-eval "$(starship init zsh)"
