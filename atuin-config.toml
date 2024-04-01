@@ -9,13 +9,11 @@ filter_mode = "host"
 workspaces = false
 filter_mode_shell_up_key_binding = "global"
 search_mode_shell_up_key_binding = "fuzzy"
-style = "compact"
-inline_height = 5
+style = "auto"
 invert = false
-show_preview = true
+show_preview = false
 exit_mode = "return-original"
 word_chars = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-show_help = true
 show_tabs = true
 enter_accept = true
 keymap_mode = "vim-normal"
@@ -26,4 +24,4 @@ secrets_filter = true
 records = true
 
 [keys]
-scroll_exits = false
+scroll_exits = true
