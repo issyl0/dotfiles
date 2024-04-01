@@ -12,7 +12,6 @@ else
   sudo apt-get update
   sudo apt install -y -o Dpkg::Options::="--force-overwrite" bat
 
-  sudo chsh "$(whoami)" -s "/usr/bin/zsh"
   bash <(curl --proto '=https' --tlsv1.2 -sSf https://setup.atuin.sh)
 fi
 
@@ -31,9 +30,9 @@ else
   git config --file ~/.gitconfig --unset gpg.program
 
   export ATUIN_HOST_NAME="codespaces/$GITHUB_REPOSITORY"
-  export ATUIN_HOST_USER=$GITHUB_USER
 
-  atuin login -u $GITHUB_USER -p $ATUIN_PASSWORD -k $ATUIN_KEY
+  atuin login -u "$GITHUB_USER" -p "$ATUIN_PASSWORD" -k "$ATUIN_KEY"
+  eval "$(atuin init bash)"
 fi
 
 if [ -d "/workspaces/github" ]; then
