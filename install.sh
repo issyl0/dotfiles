@@ -19,7 +19,7 @@ ln -sf $(pwd)/.gitignore_global $HOME/.gitignore_global
 ln -sf $(pwd)/.gitconfig $HOME/.gitconfig
 ln -sf $(pwd)/.zshrc $HOME/.zshrc
 
-sudo mkdir -p $HOME/.config/atuin
+mkdir -p $HOME/.config/atuin
 ln -sf $(pwd)/atuin-config.toml $HOME/.config/atuin/config.toml
 
 if [[ -z "${CODESPACES}" ]]; then
