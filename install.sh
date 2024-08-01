@@ -24,6 +24,21 @@ ln -sf $(pwd)/atuin-config.toml $HOME/.config/atuin/config.toml
 
 if [[ -z "${CODESPACES}" ]]; then
   echo "not on Codespaces, don't need to unset git config for GPG signing"
+  # Write the following to the end of `.gitconfig`.
+  cat <<-EOF >> $(pwd)/.gitconfig
+[credential]
+username = issyl0
+[gpg]
+format = ssh
+[gpg "ssh"]
+program = /Applications/1Password.app/Contents/MacOS/op-ssh-sign
+[credential "https://github.com"]
+helper =
+helper = !/opt/homebrew/bin/gh auth git-credential
+[credential "https://gist.github.com"]
+helper =
+helper = !/opt/homebrew/bin/gh auth git-credential
+EOF
 else
   git config --file ~/.gitconfig --unset user.email
   git config --file ~/.gitconfig --unset user.signingkey
