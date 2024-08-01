@@ -21,7 +21,7 @@ autosquash = true
 
 [user]
 name = Issy Long
-email = me@issyl0.co.uk
+email = me@issylong.com
 signingkey = ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEjjtg6DNmdyjLGToh2BkMnaTiGzqiSq4QXe1vTFlfvN
 
 [filter "lfs"]

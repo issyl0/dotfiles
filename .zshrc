@@ -27,9 +27,15 @@ alias bibf="brew install --force-bottle"
 alias brf="brew reinstall"
 alias btf="brew test"
 alias bx="bundle exec"
+alias glom="git log --oneline ...master"
+alias gco="git checkout"
+alias gcob="git checkout -b"
+alias gcf="git commit --fixup"
+alias grb="git rebase"
+alias gcm="git commit -m"
+alias nvim="code -w"
 alias cat=bat
 alias vim=nvim
-alias nvim="code -w"
 
 if type brew &>/dev/null; then
   FPATH=$(brew --prefix)/share/zsh/site-functions:$FPATH

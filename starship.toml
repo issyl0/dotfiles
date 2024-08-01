@@ -1,17 +1,17 @@
-format = "$username$hostname$directory$git_branch$line_break$character"
+format = "$username$directory$git_branch$line_break$character"
 
 [hostname]
 ssh_only = false
-format = "[$hostname](blue) in "
+format = "[$hostname](blue)"
 
 [username]
 show_always = true
-format = "[$user](blue) at "
+format = "[$user](blue) "
 
 [directory]
 truncation_length = 0
 truncate_to_repo = false
-format = "[$path](blue)"
+format = "in [$path](blue)"
 
 [git_status]
 disabled = true
