@@ -40,7 +40,6 @@ helper =
 helper = !/opt/homebrew/bin/gh auth git-credential
 EOF
 else
-  git config --file ~/.gitconfig --unset user.email
   git config --file ~/.gitconfig --unset user.signingkey
   git config --file ~/.gitconfig --unset gpg.program
 
