@@ -12,12 +12,14 @@ else
   sudo apt-get update
   sudo apt install -y -o Dpkg::Options::="--force-overwrite" bat
 
+  curl -sS https://starship.rs/install.sh | sh
   bash <(curl --proto '=https' --tlsv1.2 -sSf https://setup.atuin.sh)
 fi
 
 ln -sf $(pwd)/.gitignore_global $HOME/.gitignore_global
 ln -sf $(pwd)/.gitconfig $HOME/.gitconfig
 ln -sf $(pwd)/.zshrc $HOME/.zshrc
+ln -sf $(pwd)/starship.toml $HOME/.config/starship.toml
 
 mkdir -p $HOME/.config/atuin
 ln -sf $(pwd)/atuin-config.toml $HOME/.config/atuin/config.toml
