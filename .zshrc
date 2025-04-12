@@ -33,9 +33,7 @@ alias gcob="git checkout -b"
 alias gcf="git commit --fixup"
 alias grb="git rebase"
 alias gcm="git commit -m"
-alias nvim="code -w"
 alias cat=bat
-alias vim=nvim
 alias ghgh="gh cs create -R github/github --devcontainer-path .devcontainer/devcontainer.json -b master -m largePremiumLinux"
 
 if type brew &>/dev/null
