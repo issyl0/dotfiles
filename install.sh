@@ -8,9 +8,10 @@ if [[ -z "${CODESPACES}" ]]; then
   echo "==> assuming installing on macOS"
   brew bundle
 else
-  echo "==> installing dotfiles in codespace"
+  echo "==> installing in codespace"
   sudo apt-get update
-  sudo apt install -y -o Dpkg::Options::="--force-overwrite" bat
+  sudo apt install -y -o Dpkg::Options::="--force-overwrite" bat zsh
+  chsh -s $(which zsh)
 
   curl -sS https://starship.rs/install.sh | sh
   bash <(curl --proto '=https' --tlsv1.2 -sSf https://setup.atuin.sh)
