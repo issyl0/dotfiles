@@ -24,7 +24,8 @@ else
   sudo dpkg -i bat_0.25.0_amd64.deb
   rm bat_0.25.0_amd64.deb
 
-  echo "==> zsh-autosuggestions, zsh-syntax-highlighting"
+  echo "==> zsh, zsh-autosuggestions, zsh-syntax-highlighting"
+  sudo chsh -s /bin/zsh $(whoami)
   git clone https://github.com/zsh-users/zsh-autosuggestions $HOME/.zsh/zsh-autosuggestions
   git clone https://github.com/zsh-users/zsh-syntax-highlighting $HOME/.zsh/zsh-syntax-highlighting
 
