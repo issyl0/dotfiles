@@ -12,7 +12,7 @@ else
   sudo apt-get update
   sudo apt install -y -o Dpkg::Options::="--force-overwrite" bat
 
-  curl -sS https://starship.rs/install.sh | sh
+  curl -sS https://starship.rs/install.sh | sh -s -- -y
   bash <(curl --proto '=https' --tlsv1.2 -sSf https://setup.atuin.sh)
 fi
 
