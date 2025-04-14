@@ -10,7 +10,7 @@ if [[ -z "${CODESPACES}" ]]; then
 else
   echo "==> installing in codespace"
   sudo apt-get update
-  sudo apt install -y -o Dpkg::Options::="--force-overwrite" bat
+  sudo apt install -y -o Dpkg::Options::="--force-overwrite" bat zsh-autosuggestions zsh-syntax-highlighting ripgrep
 
   curl -sS https://starship.rs/install.sh | sh -s -- -y
   bash <(curl --proto '=https' --tlsv1.2 -sSf https://setup.atuin.sh)
