@@ -14,6 +14,7 @@ else
 
   curl -sS https://starship.rs/install.sh | sh -s -- -y
   bash <(curl --proto '=https' --tlsv1.2 -sSf https://setup.atuin.sh)
+  source $HOME/.atuin/bin/env
 fi
 
 ln -sf $(pwd)/.gitignore_global $HOME/.gitignore_global
