@@ -2,6 +2,7 @@
 
 exec > >(tee -i $HOME/dotfiles_install.log)
 exec 2>&1
+set -x
 
 if [[ -z "${CODESPACES}" ]]; then
   echo "==> assuming installing on macOS"
