@@ -22,7 +22,9 @@ if type brew &>/dev/null; then # on macOS
   export RBENV_ROOT="$HOME/.rbenv"
   eval "$(rbenv init -)"
 else # must be on Linux, ie a Codespace
-  source /usr/local/share/zsh-autosuggestions/zsh-autosuggestions.zsh
+  source $HOME/.zsh/zsh-autosuggestions/zsh-autosuggestions.zsh
+  source $HOME/.zsh/zsh-syntax-highlighting/zsh-syntax-highlighting.zsh
+  source $HOME/.atuin/bin/env
 fi
 
 bindkey "^A" vi-beginning-of-line
