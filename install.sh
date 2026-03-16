@@ -32,7 +32,7 @@ else
 
   echo "==> starship, atuin"
   curl -sS https://starship.rs/install.sh | sh -s -- -y
-  bash <(curl --proto '=https' --tlsv1.2 -sSf https://setup.atuin.sh)
+  curl --proto '=https' --tlsv1.2 -sSf https://setup.atuin.sh | sh -s -- --non-interactive
   source $HOME/.atuin/bin/env
 fi
 
