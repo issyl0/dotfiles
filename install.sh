@@ -10,17 +10,16 @@ if [[ -z "${CODESPACES}" ]]; then
 else
   echo "==> installing in codespace"
 
-  echo "==> rg"
+  echo "==> rg, gh, bat"
+
   curl -LO https://github.com/BurntSushi/ripgrep/releases/download/14.1.1/ripgrep_14.1.1-1_amd64.deb
   sudo dpkg -i ripgrep_14.1.1-1_amd64.deb
   rm ripgrep_14.1.1-1_amd64.deb
 
-  echo "==> gh"
   curl -LO https://github.com/cli/cli/releases/download/v2.69.0/gh_2.69.0_linux_amd64.deb
   sudo dpkg -i gh_2.69.0_linux_amd64.deb
   rm gh_2.69.0_linux_amd64.deb
 
-  echo "==> bat"
   curl -LO https://github.com/sharkdp/bat/releases/download/v0.25.0/bat_0.25.0_amd64.deb
   sudo dpkg -i bat_0.25.0_amd64.deb
   rm bat_0.25.0_amd64.deb
@@ -44,6 +43,15 @@ ln -sf $(pwd)/starship.toml $HOME/.config/starship.toml
 
 mkdir -p $HOME/.config/atuin
 ln -sf $(pwd)/atuin-config.toml $HOME/.config/atuin/config.toml
+
+echo "==> installing Copilot skills
+gh extension install github/gh-hubber-skills
+gh hubber-skills install contributions-skill
+gh hubber-skills install watch-ci-skill
+gh hubber-skills install splunk-log-analysis-skill
+gh hubber-skills install port-skill
+gh hubber-skills install gh-telemetry-instrumentation-skill
+gh hubber-skills install gh-semantic-conventions-skill
 
 if [[ -z "${CODESPACES}" ]]; then
   echo "not on Codespaces, don't need to unset git config for GPG signing"
