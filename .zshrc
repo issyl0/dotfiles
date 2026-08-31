@@ -6,18 +6,11 @@ fi
 export GOPATH=$HOME/go
 export PATH=$HOME/bin:/usr/local/bin:/usr/local/sbin:$GOPATH/bin:$HOME/.cargo/bin:$PATH
 
-autoload -Uz compinit
-compinit
-
 if type brew &>/dev/null; then # on macOS
   FPATH=$(brew --prefix)/share/zsh/site-functions:$FPATH
-  compinit
 
+  autoload -U compinit && compinit -u
   source "$(brew --prefix)/share/zsh-autosuggestions/zsh-autosuggestions.zsh"
-
-  export GPG_TTY="$(tty)"
-  export SSH_AUTH_SOCK=$(gpgconf --list-dirs agent-ssh-socket)
-  gpgconf --launch gpg-agent
 
   export RBENV_ROOT="$HOME/.rbenv"
   eval "$(rbenv init -)"
@@ -44,16 +37,18 @@ alias gcm="git commit -m"
 alias gco="git checkout"
 alias gcob="git checkout -b"
 alias ghgh="gh cs create -R github/github --devcontainer-path .devcontainer/devcontainer.json -b master -m largePremiumLinux"
-alias glom="git log --oneline ...master"
+alias glom='b=$(git symbolic-ref refs/remotes/origin/HEAD | sed "s@^refs/remotes/origin/@@"); git log --oneline ..."$b"'
+alias glo=glom
+alias gr='b=$(git symbolic-ref refs/remotes/origin/HEAD | sed "s@^refs/remotes/origin/@@"); git checkout "$b" && git pull origin "$b" && git checkout - && git rebase -i "$b"'
 alias gpx="git log -S"
 alias gpxd="git log -pS"
 alias grb="git rebase"
 alias gs="git status"
+alias gd="git diff"
 
 export HOMEBREW_DEVELOPER=1
 export HOMEBREW_GITHUB_USER=issyl0
 export HOMEBREW_NO_AUTO_UPDATE=1
-export HOMEBREW_NO_ANALYTICS=1
 
 export EDITOR="code -w"
 export GIT_EDITOR="code -w"
