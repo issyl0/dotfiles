@@ -41,6 +41,12 @@ mkdir -p $HOME/.config/atuin
 ln -sf $(pwd)/atuin-config.toml $HOME/.config/atuin/config.toml
 
 if [[ -z "${CODESPACES}" ]]; then
+  echo "==> Copilot CLI: instructions"
+  mkdir -p $HOME/.copilot
+  ln -sf $(pwd)/copilot/copilot-instructions.md $HOME/.copilot/copilot-instructions.md
+fi
+
+if [[ -z "${CODESPACES}" ]]; then
   echo "not on Codespaces, don't need to unset git config for GPG signing"
   # Write the following to the end of `.gitconfig`.
   cat <<-EOF >> $(pwd)/.gitconfig
