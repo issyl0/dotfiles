@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "hooks": {
+    "agentStop": [
+      {
+        "type": "command",
+        "exec": "__HOME__/.copilot/bin/export-session-to-joplin",
+        "args": ["--event", "agentStop"],
+        "timeoutSec": 10
+      }
+    ],
+    "sessionEnd": [
+      {
+        "type": "command",
+        "exec": "__HOME__/.copilot/bin/export-session-to-joplin",
+        "args": ["--event", "sessionEnd"],
+        "timeoutSec": 30
+      }
+    ]
+  }
+}

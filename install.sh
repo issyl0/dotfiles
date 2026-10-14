@@ -41,9 +41,16 @@ mkdir -p $HOME/.config/atuin
 ln -sf $(pwd)/atuin-config.toml $HOME/.config/atuin/config.toml
 
 if [[ -z "${CODESPACES}" ]]; then
-  echo "==> Copilot CLI: instructions"
-  mkdir -p $HOME/.copilot
+  echo "==> Copilot CLI: instructions and Joplin session export"
+  mkdir -p $HOME/.copilot/bin $HOME/.copilot/hooks $HOME/.copilot/logs $HOME/Library/LaunchAgents
   ln -sf $(pwd)/copilot/copilot-instructions.md $HOME/.copilot/copilot-instructions.md
+  ln -sf $(pwd)/copilot/bin/export-session-to-joplin $HOME/.copilot/bin/export-session-to-joplin
+  sed "s#__HOME__#$HOME#g" copilot/hooks/joplin-session-export.json > $HOME/.copilot/hooks/joplin-session-export.json
+
+  plist=$HOME/Library/LaunchAgents/com.issyl0.copilot-joplin-export.plist
+  launchctl bootout gui/$(id -u) $plist 2>/dev/null || true
+  sed "s#__HOME__#$HOME#g" copilot/launchd/com.issyl0.copilot-joplin-export.plist > $plist
+  launchctl bootstrap gui/$(id -u) $plist
 fi
 
 if [[ -z "${CODESPACES}" ]]; then

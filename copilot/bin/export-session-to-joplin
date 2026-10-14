@@ -1,0 +1,358 @@
+#!/usr/bin/env python3
+"""Export Copilot CLI session transcripts to Joplin.
+
+Modes:
+  (default)  Read a hook payload on stdin (sessionEnd or agentStop) and export.
+  --dedupe   Trash duplicate notes for the same session across all notebooks.
+  --sweep    Export every recently active, not-yet-ended session (run by launchd
+             every 15 minutes) and retry anything queued.
+
+Each session maps to exactly one Joplin note, updated in place. Exports are
+skipped when the transcript hasn't changed, and extra notes for the same
+session (same source_url) are moved to Joplin's trash.
+"""
+
+import datetime
+import fcntl
+import hashlib
+import json
+import os
+import re
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+
+COPILOT_HOME = Path(os.environ.get("COPILOT_HOME", Path.home() / ".copilot"))
+JOPLIN_SETTINGS = Path.home() / ".config" / "joplin-desktop" / "settings.json"
+STATE_PATH = COPILOT_HOME / "joplin-export-state.json"
+META_PATH = COPILOT_HOME / "joplin-export-meta.json"
+LOCK_PATH = COPILOT_HOME / "joplin-export.lock"
+QUEUE_DIR = COPILOT_HOME / "joplin-export-queue"
+SESSION_STATE = COPILOT_HOME / "session-state"
+API_BASE = "http://127.0.0.1:41184"
+SWEEP_WINDOW_SECONDS = 24 * 60 * 60
+GITHUB_NOTEBOOK = "GitHub"
+DEFAULT_NOTEBOOK = "Copilot Sessions"
+
+
+def read_json(path, default):
+    try:
+        return json.loads(path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return default
+
+
+def write_json(path, value):
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
+    tmp.replace(path)
+
+
+def api_request(token, method, path, payload=None):
+    separator = "&" if "?" in path else "?"
+    url = f"{API_BASE}{path}{separator}token={urllib.parse.quote(token)}"
+    data = json.dumps(payload).encode() if payload is not None else None
+    request = urllib.request.Request(
+        url,
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method=method,
+    )
+    with urllib.request.urlopen(request, timeout=10) as response:
+        body = response.read()
+        return json.loads(body) if body else {}
+
+
+def joplin_up():
+    try:
+        with urllib.request.urlopen(f"{API_BASE}/ping", timeout=2) as response:
+            return response.read().decode().strip() == "JoplinClipperServer"
+    except OSError:
+        return False
+
+
+def paged(token, path):
+    items, page = [], 1
+    while True:
+        separator = "&" if "?" in path else "?"
+        result = api_request(token, "GET", f"{path}{separator}limit=100&page={page}")
+        items.extend(result.get("items", []))
+        if not result.get("has_more"):
+            return items
+        page += 1
+
+
+_folder_cache = {}
+
+
+def notebook_id(token, title):
+    if title not in _folder_cache:
+        for folder in paged(token, "/folders?fields=id,title,parent_id"):
+            if folder["title"] == title and not folder["parent_id"]:
+                _folder_cache[title] = folder["id"]
+                break
+        else:
+            _folder_cache[title] = api_request(token, "POST", "/folders", {"title": title})["id"]
+    return _folder_cache[title]
+
+
+def workspace_info(session_id):
+    info = {}
+    path = SESSION_STATE / session_id / "workspace.yaml"
+    try:
+        for line in path.read_text().splitlines():
+            key, sep, value = line.partition(":")
+            if sep and not line.startswith(" "):
+                info[key.strip()] = value.strip()
+    except FileNotFoundError:
+        pass
+    return info
+
+
+def notebook_for(session_id):
+    repository = workspace_info(session_id).get("repository", "")
+    return GITHUB_NOTEBOOK if repository.lower().startswith("github/") else DEFAULT_NOTEBOOK
+
+
+def iso_timestamp(value):
+    if isinstance(value, (int, float)):
+        return datetime.datetime.fromtimestamp(
+            value / 1000,
+            tz=datetime.timezone.utc,
+        ).isoformat()
+    return str(value or "")
+
+
+def load_messages(session_id):
+    events_path = SESSION_STATE / session_id / "events.jsonl"
+    messages = []
+    for line in events_path.read_text().splitlines():
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        event_type = event.get("type")
+        data = event.get("data", {})
+        content = data.get("content")
+        if event_type not in {"user.message", "assistant.message"}:
+            continue
+        if not isinstance(content, str) or not content.strip():
+            continue
+        role = "User" if event_type == "user.message" else "Copilot"
+        messages.append((role, iso_timestamp(event.get("timestamp")), content.strip()))
+    return messages
+
+
+def title_for(messages, started_at):
+    first_user_message = next(
+        (content for role, _, content in messages if role == "User"),
+        "Copilot session",
+    )
+    summary = re.sub(r"\s+", " ", first_user_message).strip()
+    if len(summary) > 80:
+        summary = f"{summary[:77].rstrip()}..."
+    date = (started_at or "")[:10] or datetime.date.today().isoformat()
+    return f"Copilot transcript - {date} - {summary}"
+
+
+def markdown(payload, messages, ended):
+    session_id = payload["sessionId"]
+    status = f"ended (`{payload.get('reason', 'unknown')}`)" if ended else "in progress"
+    lines = [
+        "# Copilot session transcript",
+        "",
+        f"- **Session:** `{session_id}`",
+        f"- **Working directory:** `{payload.get('cwd', '')}`",
+        f"- **Status:** {status}",
+        f"- **Last updated:** {iso_timestamp(payload.get('timestamp'))}",
+        "",
+    ]
+    for role, timestamp, content in messages:
+        lines.extend([f"## {role}", "", f"*{timestamp}*", "", content, ""])
+    return "\n".join(lines)
+
+
+def notes_for_session(token, session_id):
+    source_url = f"copilot-session://{session_id}"
+    query = urllib.parse.quote(f'sourceurl:"{source_url}"')
+    found = paged(token, f"/search?query={query}&fields=id,source_url,updated_time")
+    return [n for n in found if n.get("source_url") == source_url]
+
+
+def export(token, payload, state, meta):
+    session_id = payload["sessionId"]
+    event = payload.get("event")
+    ended = event == "sessionEnd"
+    session_meta = meta.get(session_id, {})
+    if event == "sweep" and (
+        session_meta.get("ended") or (session_id in state and not session_meta)
+    ):
+        # Ended sessions only change again if resumed, which fires agentStop.
+        return False
+
+    messages = load_messages(session_id)
+    started_at = messages[0][1] if messages else iso_timestamp(payload.get("timestamp"))
+    digest = hashlib.sha256(
+        json.dumps([messages, ended, payload.get("reason") if ended else None]).encode()
+    ).hexdigest()
+    note_id = state.get(session_id)
+    if note_id and session_meta.get("hash") == digest:
+        return False
+
+    note = {
+        "parent_id": notebook_id(token, notebook_for(session_id)),
+        "title": title_for(messages, started_at),
+        "body": markdown(payload, messages, ended),
+        "source_url": f"copilot-session://{session_id}",
+    }
+
+    existing = [n["id"] for n in notes_for_session(token, session_id)]
+    if note_id:
+        try:
+            api_request(token, "PUT", f"/notes/{note_id}", note)
+        except urllib.error.HTTPError as error:
+            if error.code != 404:
+                raise
+            note_id = None
+    if not note_id and existing:
+        note_id = existing[0]
+        api_request(token, "PUT", f"/notes/{note_id}", note)
+    if not note_id:
+        note_id = api_request(token, "POST", "/notes", note)["id"]
+    for duplicate in existing:
+        if duplicate != note_id:
+            api_request(token, "DELETE", f"/notes/{duplicate}")
+
+    state[session_id] = note_id
+    meta[session_id] = {"hash": digest, "ended": ended, "exported_at": int(time.time())}
+    return True
+
+
+def payload_from_hook(raw, event):
+    session_id = raw.get("sessionId") or raw.get("session_id")
+    if not session_id:
+        raise SystemExit("hook payload did not include sessionId")
+    return {
+        "sessionId": session_id,
+        "timestamp": raw.get("timestamp") or int(time.time() * 1000),
+        "cwd": raw.get("cwd", ""),
+        "reason": raw.get("reason"),
+        "event": event,
+    }
+
+
+def active_sessions():
+    cutoff = time.time() - SWEEP_WINDOW_SECONDS
+    for events_path in SESSION_STATE.glob("*/events.jsonl"):
+        try:
+            mtime = events_path.stat().st_mtime
+        except FileNotFoundError:
+            continue
+        if mtime < cutoff:
+            continue
+        session_id = events_path.parent.name
+        yield {
+            "sessionId": session_id,
+            "timestamp": int(mtime * 1000),
+            "cwd": workspace_info(session_id).get("cwd", ""),
+            "event": "sweep",
+        }
+
+
+def queue(payload):
+    QUEUE_DIR.mkdir(parents=True, exist_ok=True)
+    path = QUEUE_DIR / f"{payload['sessionId']}.json"
+    previous = read_json(path, {})
+    # Never let an in-progress update overwrite a queued sessionEnd.
+    if previous.get("event", "sessionEnd") == "sessionEnd" and previous and payload.get("event") != "sessionEnd":
+        return
+    path.write_text(json.dumps(payload))
+
+
+def run(payloads):
+    for payload in payloads:
+        queue(payload)
+
+    token = read_json(JOPLIN_SETTINGS, {}).get("api.token")
+    if not token:
+        raise SystemExit("Joplin API token is not configured")
+    if not joplin_up():
+        print("Joplin is not running; export queued", file=sys.stderr)
+        return
+
+    LOCK_PATH.touch(exist_ok=True)
+    with LOCK_PATH.open() as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        state = read_json(STATE_PATH, {})
+        meta = read_json(META_PATH, {})
+        for pending_path in sorted(QUEUE_DIR.glob("*.json")):
+            pending = read_json(pending_path, None)
+            if not pending:
+                pending_path.unlink()
+                continue
+            # Older queue entries (written by sessionEnd before this version) have no "event".
+            pending.setdefault("event", "sessionEnd")
+            try:
+                export(token, pending, state, meta)
+            except FileNotFoundError:
+                pass
+            except (OSError, urllib.error.URLError, json.JSONDecodeError) as error:
+                print(f"Joplin export queued: {error}", file=sys.stderr)
+                continue
+            pending_path.unlink()
+            write_json(STATE_PATH, state)
+            write_json(META_PATH, meta)
+
+
+def dedupe_all():
+    token = read_json(JOPLIN_SETTINGS, {}).get("api.token")
+    if not token or not joplin_up():
+        raise SystemExit("Joplin is not reachable")
+    state = read_json(STATE_PATH, {})
+    by_session = {}
+    for note in paged(token, "/notes?fields=id,source_url,updated_time"):
+        url = note.get("source_url", "")
+        if url.startswith("copilot-session://"):
+            by_session.setdefault(url[len("copilot-session://"):], []).append(note)
+    for session_id, notes in by_session.items():
+        if len(notes) < 2:
+            continue
+        ids = [n["id"] for n in notes]
+        keep = state.get(session_id)
+        if keep not in ids:
+            keep = max(notes, key=lambda n: n["updated_time"])["id"]
+        for note_id in ids:
+            if note_id != keep:
+                api_request(token, "DELETE", f"/notes/{note_id}")
+                print(f"Trashed duplicate {note_id} for session {session_id}")
+        state[session_id] = keep
+    write_json(STATE_PATH, state)
+
+
+def main():
+    if "--dedupe" in sys.argv:
+        dedupe_all()
+        return
+    if "--sweep" in sys.argv:
+        run(list(active_sessions()))
+        return
+
+    event = sys.argv[sys.argv.index("--event") + 1] if "--event" in sys.argv else "sessionEnd"
+    payload = payload_from_hook(json.load(sys.stdin), event)
+    if payload["event"] == "agentStop":
+        # Don't hold up the end of the turn: finish in a detached child.
+        if os.fork():
+            return
+        os.setsid()
+        devnull = os.open(os.devnull, os.O_RDWR)
+        for fd in (0, 1, 2):
+            os.dup2(devnull, fd)
+    run([payload])
+
+
+if __name__ == "__main__":
+    main()
