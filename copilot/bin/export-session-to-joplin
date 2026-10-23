@@ -4,6 +4,7 @@
 Modes:
   (default)  Read a hook payload on stdin (sessionEnd or agentStop) and export.
   --dedupe   Trash duplicate notes for the same session across all notebooks.
+  --retitle  Update the titles of every exported note to the current format.
   --sweep    Export every recently active, not-yet-ended session (run by launchd
              every 15 minutes) and retry anything queued.
 
@@ -104,13 +105,38 @@ def workspace_info(session_id):
     info = {}
     path = SESSION_STATE / session_id / "workspace.yaml"
     try:
-        for line in path.read_text().splitlines():
-            key, sep, value = line.partition(":")
-            if sep and not line.startswith(" "):
-                info[key.strip()] = value.strip()
+        lines = path.read_text().splitlines()
     except FileNotFoundError:
-        pass
+        return info
+    block_key = None
+    for line in lines:
+        if block_key and (line.startswith(" ") or not line):
+            info[block_key] = f"{info[block_key]}\n{line.strip()}".strip()
+            continue
+        block_key = None
+        key, sep, value = line.partition(":")
+        if not sep:
+            continue
+        key, value = key.strip(), value.strip()
+        if value in {"|", "|-", ">", ">-"}:
+            block_key = key
+            value = ""
+        info[key] = value
     return info
+
+
+def checkpoint_titles(session_id):
+    index = SESSION_STATE / session_id / "checkpoints" / "index.md"
+    try:
+        rows = index.read_text().splitlines()
+    except FileNotFoundError:
+        return []
+    titles = []
+    for row in rows:
+        cells = [cell.strip() for cell in row.strip().strip("|").split("|")]
+        if len(cells) >= 2 and cells[0].isdigit() and cells[1]:
+            titles.append((int(cells[0]), cells[1]))
+    return [title for _, title in sorted(titles)]
 
 
 def notebook_for(session_id):
@@ -147,16 +173,42 @@ def load_messages(session_id):
     return messages
 
 
-def title_for(messages, started_at):
+def one_line(text, limit=100):
+    text = re.sub(r"\s+", " ", text or "").strip()
+    if len(text) > limit:
+        text = f"{text[:limit - 3].rstrip()}..."
+    return text
+
+
+def summary_for(session_id, messages):
+    """Best available description of what the session covered.
+
+    In order: a name the user set, the checkpoint titles (first and latest,
+    since long sessions drift), the CLI's generated name, then the first
+    user message.
+    """
+    info = workspace_info(session_id)
+    name = one_line(info.get("name"))
+    if name and info.get("user_named") == "true":
+        return name
+    checkpoints = checkpoint_titles(session_id)
+    if len(checkpoints) == 1:
+        return one_line(checkpoints[0])
+    if checkpoints:
+        return one_line(f"{checkpoints[0]} → {checkpoints[-1]}")
+    # A multi-line generated name is just the raw first prompt; skip it.
+    if name and "\n" not in (info.get("name") or "") and len(name) <= 80:
+        return name
     first_user_message = next(
         (content for role, _, content in messages if role == "User"),
         "Copilot session",
     )
-    summary = re.sub(r"\s+", " ", first_user_message).strip()
-    if len(summary) > 80:
-        summary = f"{summary[:77].rstrip()}..."
+    return one_line(first_user_message, 80)
+
+
+def title_for(session_id, messages, started_at):
     date = (started_at or "")[:10] or datetime.date.today().isoformat()
-    return f"Copilot transcript - {date} - {summary}"
+    return f"Copilot transcript - {date} - {summary_for(session_id, messages)}"
 
 
 def markdown(payload, messages, ended):
@@ -196,8 +248,9 @@ def export(token, payload, state, meta):
 
     messages = load_messages(session_id)
     started_at = messages[0][1] if messages else iso_timestamp(payload.get("timestamp"))
+    title = title_for(session_id, messages, started_at)
     digest = hashlib.sha256(
-        json.dumps([messages, ended, payload.get("reason") if ended else None]).encode()
+        json.dumps([messages, ended, payload.get("reason") if ended else None, title]).encode()
     ).hexdigest()
     note_id = state.get(session_id)
     if note_id and session_meta.get("hash") == digest:
@@ -205,7 +258,7 @@ def export(token, payload, state, meta):
 
     note = {
         "parent_id": notebook_id(token, notebook_for(session_id)),
-        "title": title_for(messages, started_at),
+        "title": title,
         "body": markdown(payload, messages, ended),
         "source_url": f"copilot-session://{session_id}",
     }
@@ -333,9 +386,32 @@ def dedupe_all():
     write_json(STATE_PATH, state)
 
 
+def retitle_all():
+    token = read_json(JOPLIN_SETTINGS, {}).get("api.token")
+    if not token or not joplin_up():
+        raise SystemExit("Joplin is not reachable")
+    for note in paged(token, "/notes?fields=id,title,source_url"):
+        url = note.get("source_url", "")
+        if not url.startswith("copilot-session://"):
+            continue
+        session_id = url[len("copilot-session://"):]
+        try:
+            messages = load_messages(session_id)
+        except FileNotFoundError:
+            continue
+        started_at = messages[0][1] if messages else ""
+        title = title_for(session_id, messages, started_at)
+        if title != note["title"]:
+            api_request(token, "PUT", f"/notes/{note['id']}", {"title": title})
+            print(f"{note['title']}\n  -> {title}")
+
+
 def main():
     if "--dedupe" in sys.argv:
         dedupe_all()
+        return
+    if "--retitle" in sys.argv:
+        retitle_all()
         return
     if "--sweep" in sys.argv:
         run(list(active_sessions()))
