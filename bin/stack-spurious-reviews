@@ -1,0 +1,484 @@
+#!/usr/bin/env bash
+# Find, inspect, and clear team review requests caused by the
+# stacked PRs + rebase CODEOWNERS bug: the team is requested as a code owner
+# even though none of the PR's files (diffed against its own base) are owned by it.
+set -euo pipefail
+
+REPO="${STACK_REVIEWS_REPO:-github/github}"
+TEAM="${STACK_REVIEWS_TEAM:-github/monolith-platform-reviewers}"
+HOST="${STACK_REVIEWS_HOST:-github.com}"
+LIMIT=200
+BURST_WINDOW=120
+BURST_MIN=5
+YES=0
+FORCE=0
+REMOVE=0
+SHOW_ALL=0
+QUICK=0
+COMMENT=1
+
+usage() {
+  cat <<'EOF'
+Usage:
+  stack-spurious-reviews detect  [--remove] [--yes] [--all] [--limit N] [--no-comment]
+  stack-spurious-reviews inspect <pr>
+  stack-spurious-reviews remove  <pr>... [--yes] [--force] [--no-comment]
+
+Commands:
+  detect   List open PRs requesting the team's review where the team owns none
+           of the PR's files. Flags stack membership and request bursts.
+           --remove prompts to remove the request from LIKELY/POSSIBLE PRs.
+           --all also lists PRs the team does own files in.
+  inspect  Show files, owners, stack, and review-request timeline for one PR.
+  remove   Remove the team review request, then comment on the PR saying why.
+           Re-checks ownership first. Refuses OWNED/CHECK/MANUAL verdicts
+           unless --force.
+
+Options:
+  --team ORG/SLUG   Team (default: $STACK_REVIEWS_TEAM or github/monolith-platform-reviewers)
+  --repo OWNER/REPO Repository (default: $STACK_REVIEWS_REPO or github/github)
+  --host HOST       GitHub host (default: $STACK_REVIEWS_HOST or github.com)
+  --limit N         Max PRs to scan in detect (default: 200)
+  --yes             Don't prompt before removing
+  --force           Remove even if the verdict isn't LIKELY/POSSIBLE
+  --no-comment      Don't comment on the PR after removing the request
+
+Verdicts:
+  LIKELY    Code-owner request, no owned files, PR is stacked (native stack or
+            non-default base). Almost certainly the bug.
+  POSSIBLE  Code-owner request, no owned files, not stacked, but requested in a
+            burst of >= 5 team requests. Probably a rebase/base-change artefact.
+  UNOWNED   Code-owner request, no owned files, no stack, no burst. Look manually.
+  MANUAL    Request wasn't made as code owner (someone asked by hand).
+  OWNED     Team owns at least one changed file. Legit.
+  CHECK     Couldn't get the full file list (>3000 files). Look manually.
+EOF
+}
+
+die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+log() { printf '%s\n' "$*" >&2; }
+
+CMD="${1:-}"
+[ -n "$CMD" ] || { usage; exit 1; }
+shift
+PRS=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --team) TEAM="${2:?--team needs a value}"; shift 2 ;;
+    --repo) REPO="${2:?--repo needs a value}"; shift 2 ;;
+    --host) HOST="${2:?--host needs a value}"; shift 2 ;;
+    --limit) LIMIT="${2:?--limit needs a value}"; shift 2 ;;
+    --yes|-y) YES=1; shift ;;
+    --force) FORCE=1; shift ;;
+    --remove) REMOVE=1; shift ;;
+    --all) SHOW_ALL=1; shift ;;
+    --no-comment) COMMENT=0; shift ;;
+    -h|--help) usage; exit 0 ;;
+    -*) die "unknown option: $1" ;;
+    *) PRS+=("${1#\#}"); shift ;;
+  esac
+done
+
+[[ "$REPO" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || die "bad repo: $REPO"
+[[ "$TEAM" =~ ^@?[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || die "bad team: $TEAM"
+[[ "$HOST" =~ ^[A-Za-z0-9.-]+$ ]] || die "bad host: $HOST"
+[[ "$LIMIT" =~ ^[0-9]+$ ]] || die "bad limit: $LIMIT"
+TEAM="${TEAM#@}"
+TEAM_SLUG="${TEAM#*/}"
+OWNER="${REPO%%/*}"
+NAME="${REPO#*/}"
+
+for bin in gh jq python3; do
+  command -v "$bin" >/dev/null || die "$bin is required"
+done
+
+api() { gh api --hostname "$HOST" "$@"; }
+
+WORKDIR="$(mktemp -d)"
+trap 'rm -rf "$WORKDIR"' EXIT
+
+# CODEOWNERS matcher. Last matching pattern wins. Reads paths on stdin, prints
+# "path<TAB>owners<TAB>owned" where owned is 1 if the team is among the owners.
+cat >"$WORKDIR/owners.py" <<'PY'
+import re
+import sys
+
+
+def compile_pattern(pattern):
+    anchored = pattern.startswith("/")
+    dir_only = pattern.endswith("/")
+    body = pattern.strip("/")
+    if not anchored and "/" in body and not body.startswith("**/"):
+        anchored = True
+    if anchored and "*" not in body and "?" not in body:
+        # Most entries are literal paths; string checks are much faster than regexes.
+        prefix = body + "/"
+        if dir_only:
+            return lambda path: path.startswith(prefix)
+        return lambda path: path == body or path.startswith(prefix)
+    last = body.rsplit("/", 1)[-1]
+    out = []
+    i = 0
+    while i < len(body):
+        if body.startswith("**/", i):
+            out.append("(?:.*/)?")
+            i += 3
+        elif body.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif body[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif body[i] == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(body[i]))
+            i += 1
+    prefix = "" if anchored else "(?:.*/)?"
+    if dir_only:
+        suffix = "/.*"
+    elif "*" in last and last != "**":
+        suffix = ""
+    else:
+        suffix = "(?:/.*)?"
+    return re.compile(prefix + "".join(out) + suffix + r"\Z").match
+
+
+codeowners_path, team = sys.argv[1], sys.argv[2].lower()
+rules = []
+with open(codeowners_path, encoding="utf-8") as f:
+    for line in f:
+        line = line.split(" #", 1)[0].strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split()
+        try:
+            rules.append((compile_pattern(parts[0]), [o.lower() for o in parts[1:]]))
+        except re.error:
+            continue
+rules.reverse()
+
+for path in sys.stdin:
+    path = path.rstrip("\n")
+    if not path:
+        continue
+    owners = []
+    for matches, rule_owners in rules:
+        if matches(path):
+            owners = rule_owners
+            break
+    owned = "1" if ("@" + team) in owners else "0"
+    print(f"{path}\t{' '.join(owners) or '-'}\t{owned}")
+PY
+
+DEFAULT_BRANCH=""
+default_branch() {
+  if [ -z "$DEFAULT_BRANCH" ]; then
+    DEFAULT_BRANCH="$(api "repos/$REPO" --jq .default_branch)"
+  fi
+  printf '%s\n' "$DEFAULT_BRANCH"
+}
+
+CODEOWNERS="$WORKDIR/CODEOWNERS"
+fetch_codeowners() {
+  [ -s "$CODEOWNERS" ] && return 0
+  local branch path
+  branch="$(default_branch)"
+  for path in .github/CODEOWNERS CODEOWNERS docs/CODEOWNERS; do
+    if api -H 'Accept: application/vnd.github.raw+json' \
+      "repos/$REPO/contents/$path?ref=$branch" >"$CODEOWNERS" 2>/dev/null && [ -s "$CODEOWNERS" ]; then
+      return 0
+    fi
+  done
+  die "couldn't fetch CODEOWNERS from $REPO@$branch"
+}
+
+check_pr_number() {
+  [[ "$1" =~ ^[0-9]+$ ]] || die "bad PR number: $1"
+}
+
+# Populates PR_* globals for one PR. Caches per-PR data in $WORKDIR.
+analyze_pr() {
+  local pr="$1"
+  check_pr_number "$pr"
+  fetch_codeowners
+
+  api "repos/$REPO/pulls/$pr" >"$WORKDIR/pr-$pr.json"
+  PR_TITLE="$(jq -r .title "$WORKDIR/pr-$pr.json")"
+  PR_AUTHOR="$(jq -r .user.login "$WORKDIR/pr-$pr.json")"
+  PR_STATE="$(jq -r .state "$WORKDIR/pr-$pr.json")"
+  PR_DRAFT="$(jq -r .draft "$WORKDIR/pr-$pr.json")"
+  PR_BASE="$(jq -r .base.ref "$WORKDIR/pr-$pr.json")"
+  PR_HEAD="$(jq -r .head.ref "$WORKDIR/pr-$pr.json")"
+  PR_URL="$(jq -r .html_url "$WORKDIR/pr-$pr.json")"
+  PR_CHANGED_FILES="$(jq -r .changed_files "$WORKDIR/pr-$pr.json")"
+
+  # Files are diffed against the PR's own base, so a stacked PR only shows its layer.
+  # Renames count both paths, matching how CODEOWNERS requests are computed.
+  api --paginate "repos/$REPO/pulls/$pr/files?per_page=100" \
+    --jq '.[] | .filename, (.previous_filename // empty)' | sort -u >"$WORKDIR/files-$pr"
+  python3 "$WORKDIR/owners.py" "$CODEOWNERS" "$TEAM" <"$WORKDIR/files-$pr" >"$WORKDIR/owners-$pr"
+  PR_FILES="$(grep -c . "$WORKDIR/files-$pr" || true)"
+  PR_OWNED="$(awk -F'\t' '$3 == "1"' "$WORKDIR/owners-$pr" | grep -c . || true)"
+  PR_TRUNCATED=0
+  [ "$PR_CHANGED_FILES" -ge 3000 ] && PR_TRUNCATED=1
+
+  # detect without --all only reports unowned PRs, so skip the slower lookups.
+  if [ "$QUICK" = 1 ] && [ "$PR_TRUNCATED" = 0 ] && [ "$PR_OWNED" -gt 0 ]; then
+    PR_VERDICT="OWNED"
+    return 0
+  fi
+
+  # Is the team still requested, and was it requested as a code owner?
+  # shellcheck disable=SC2016
+  api graphql -F owner="$OWNER" -F name="$NAME" -F number="$pr" -f query='
+    query($owner: String!, $name: String!, $number: Int!) {
+      repository(owner: $owner, name: $name) {
+        pullRequest(number: $number) {
+          reviewRequests(first: 100) {
+            nodes { asCodeOwner requestedReviewer { ... on Team { combinedSlug } } }
+          }
+        }
+      }
+    }' >"$WORKDIR/requests-$pr.json"
+  PR_REQUESTED="$(jq -r --arg t "$TEAM" '
+    [.data.repository.pullRequest.reviewRequests.nodes[]
+      | select((.requestedReviewer.combinedSlug // "" | ascii_downcase) == ($t | ascii_downcase))]
+    | if length == 0 then "no" elif .[0].asCodeOwner then "codeowner" else "manual" end
+  ' "$WORKDIR/requests-$pr.json")"
+  PR_TEAM_REQUESTS="$(jq -r '[.data.repository.pullRequest.reviewRequests.nodes[] | select(.requestedReviewer.combinedSlug)] | length' "$WORKDIR/requests-$pr.json")"
+
+  # Native stack membership, falling back to "dependent chain" for non-default bases.
+  PR_STACK="none"
+  PR_STACK_NUMBER=""
+  if api "repos/$REPO/stacks?pull_request=$pr" >"$WORKDIR/stack-$pr.json" 2>/dev/null; then
+    if [ "$(jq 'length' "$WORKDIR/stack-$pr.json")" -gt 0 ]; then
+      PR_STACK_NUMBER="$(jq -r '.[0].number' "$WORKDIR/stack-$pr.json")"
+      PR_STACK="$(jq -r --argjson pr "$pr" '.[0] as $s
+        | ($s.pull_requests | map(.number) | index($pr)) as $i
+        | "stack #\($s.number) (\(if $i == null then "?" else $i + 1 end)/\($s.pull_requests | length))"
+      ' "$WORKDIR/stack-$pr.json")"
+    fi
+  else
+    PR_STACK="unknown"
+  fi
+  if [ "$PR_STACK" = "none" ] || [ "$PR_STACK" = "unknown" ]; then
+    if [ "$PR_BASE" != "$(default_branch)" ]; then
+      PR_STACK="chain (base: $PR_BASE)"
+    fi
+  fi
+
+  # Review-request timeline: how many team requests landed within BURST_WINDOW of ours?
+  api --paginate "repos/$REPO/issues/$pr/timeline?per_page=100" --jq '.[]
+    | select(.event == "review_requested" or .event == "review_request_removed"
+        or .event == "base_ref_changed" or .event == "head_ref_force_pushed"
+        or .event == "ready_for_review" or .event == "convert_to_draft")
+    | {event, created_at, actor: (.actor.login // null),
+       team: (.requested_team.slug // null), user: (.requested_reviewer.login // null)}' \
+    >"$WORKDIR/timeline-$pr.jsonl"
+  local burst
+  burst="$(jq -rs --arg t "$TEAM_SLUG" --argjson w "$BURST_WINDOW" '
+    ([.[] | select(.event == "review_requested" and .team == $t)] | last) as $ours
+    | if $ours == null then "0\t-" else
+        ($ours.created_at | fromdateiso8601) as $ts
+        | [.[] | select(.event == "review_requested" and .team != null
+            and ((((.created_at | fromdateiso8601) - $ts) | fabs) <= $w))]
+        | "\(length)\t\($ours.created_at)"
+      end' "$WORKDIR/timeline-$pr.jsonl")"
+  PR_BURST="${burst%%$'\t'*}"
+  PR_REQUESTED_AT="${burst#*$'\t'}"
+
+  if [ "$PR_TRUNCATED" = 1 ]; then
+    PR_VERDICT="CHECK"
+  elif [ "$PR_OWNED" -gt 0 ]; then
+    PR_VERDICT="OWNED"
+  elif [ "$PR_REQUESTED" = "manual" ]; then
+    PR_VERDICT="MANUAL"
+  elif [ "$PR_STACK" != "none" ] && [ "$PR_STACK" != "unknown" ]; then
+    PR_VERDICT="LIKELY"
+  elif [ "$PR_BURST" -ge "$BURST_MIN" ]; then
+    PR_VERDICT="POSSIBLE"
+  else
+    PR_VERDICT="UNOWNED"
+  fi
+}
+
+confirm() {
+  [ "$YES" = 1 ] && return 0
+  local answer
+  printf '%s [y/N] ' "$1" >/dev/tty
+  read -r answer </dev/tty || return 1
+  [[ "$answer" =~ ^[Yy] ]]
+}
+
+# shellcheck disable=SC2016
+removal_comment() {
+  local possessive="'s"
+  case "$TEAM" in *s|*S) possessive="'" ;; esac
+  if [ "$PR_STACK" = "none" ] || [ "$PR_STACK" = "unknown" ]; then
+    printf 'Ah this is the _rebase = many wrong review requests_ problem again? Removing `%s`%s request since we don'"'"'t own any files here.' \
+      "$TEAM" "$possessive"
+  else
+    printf 'Ah this is the _stacked PRs + rebase = many wrong review requests_ problem again? Removing `%s`%s request since we don'"'"'t own any files here.' \
+      "$TEAM" "$possessive"
+  fi
+}
+
+remove_request() {
+  local pr="$1"
+  analyze_pr "$pr"
+  if [ "$PR_REQUESTED" = "no" ]; then
+    log "#$pr: $TEAM isn't requested. Nothing to do."
+    return 0
+  fi
+  if [ "$PR_STATE" != "open" ]; then
+    log "#$pr: PR is $PR_STATE. Skipping."
+    return 0
+  fi
+  case "$PR_VERDICT" in
+    LIKELY|POSSIBLE) ;;
+    *)
+      if [ "$FORCE" != 1 ]; then
+        log "#$pr: verdict $PR_VERDICT (owned files: $PR_OWNED, request: $PR_REQUESTED). Refusing without --force."
+        return 1
+      fi
+      ;;
+  esac
+
+  printf '#%s %s\n  %s | %s | owned %s/%s files | burst %s | requested %s\n' \
+    "$pr" "$PR_TITLE" "$PR_VERDICT" "$PR_STACK" "$PR_OWNED" "$PR_FILES" "$PR_BURST" "$PR_REQUESTED_AT"
+  local comment=""
+  if [ "$COMMENT" = 1 ]; then
+    comment="$(removal_comment)"
+    printf '  comment: %s\n' "$comment"
+  fi
+  if ! confirm "Remove $TEAM review request from #$pr${comment:+ and comment}?"; then
+    log "#$pr: skipped."
+    return 0
+  fi
+
+  jq -n --arg t "$TEAM_SLUG" '{team_reviewers: [$t]}' |
+    api --method DELETE "repos/$REPO/pulls/$pr/requested_reviewers" --input - >/dev/null
+
+  if api "repos/$REPO/pulls/$pr/requested_reviewers" --jq '.teams[].slug' | grep -qixF -- "$TEAM_SLUG"; then
+    log "#$pr: removal didn't stick. $TEAM is still requested. Not commenting."
+    return 1
+  fi
+  log "#$pr: removed $TEAM review request."
+
+  if [ -n "$comment" ]; then
+    local url
+    url="$(jq -n --arg b "$comment" '{body: $b}' |
+      api --method POST "repos/$REPO/issues/$pr/comments" --input - --jq .html_url)"
+    log "#$pr: commented: $url"
+  fi
+}
+
+cmd_detect() {
+  [ ${#PRS[@]} -eq 0 ] || die "detect takes no PR arguments"
+  log "Searching open PRs in $REPO requesting $TEAM..."
+  gh pr list --repo "$HOST/$REPO" --state open --limit "$LIMIT" \
+    --search "team-review-requested:$TEAM" \
+    --json number --jq '.[].number' >"$WORKDIR/candidates"
+  local total
+  total="$(grep -c . "$WORKDIR/candidates" || true)"
+  log "Found $total. Checking files and stacks..."
+  echo
+
+  local fmt='%-8s %-9s %-26s %-7s %-6s %-14s %s\n'
+  # shellcheck disable=SC2059
+  printf "$fmt" PR VERDICT STACK OWNED BURST AUTHOR TITLE
+  : >"$WORKDIR/removable"
+  local pr
+  [ "$SHOW_ALL" = 1 ] || QUICK=1
+  while read -r -u 3 pr; do
+    analyze_pr "$pr"
+    if [ "$PR_VERDICT" = "OWNED" ] && [ "$SHOW_ALL" != 1 ]; then
+      continue
+    fi
+    # shellcheck disable=SC2059
+    printf "$fmt" "#$pr" "$PR_VERDICT" "${PR_STACK:0:26}" "$PR_OWNED/$PR_FILES" "$PR_BURST" \
+      "${PR_AUTHOR:0:14}" "${PR_TITLE:0:60}"
+    case "$PR_VERDICT" in
+      LIKELY|POSSIBLE) echo "$pr" >>"$WORKDIR/removable" ;;
+    esac
+  done 3<"$WORKDIR/candidates"
+
+  QUICK=0
+  local removable
+  removable="$(grep -c . "$WORKDIR/removable" || true)"
+  echo
+  log "$removable LIKELY/POSSIBLE. Inspect with: $(basename "$0") inspect <pr>"
+  if [ "$REMOVE" = 1 ] && [ "$removable" -gt 0 ]; then
+    echo
+    while read -r -u 3 pr; do
+      remove_request "$pr" || true
+    done 3<"$WORKDIR/removable"
+  fi
+}
+
+cmd_inspect() {
+  [ ${#PRS[@]} -eq 1 ] || die "inspect takes exactly one PR"
+  local pr="${PRS[0]}"
+  analyze_pr "$pr"
+
+  printf '#%s %s\n' "$pr" "$PR_TITLE"
+  printf '  %s\n' "$PR_URL"
+  printf '  author %s | %s%s | %s <- %s\n' "$PR_AUTHOR" "$PR_STATE" \
+    "$([ "$PR_DRAFT" = true ] && echo ' (draft)')" "$PR_BASE" "$PR_HEAD"
+  echo
+  printf 'Verdict:   %s\n' "$PR_VERDICT"
+  printf 'Requested: %s (%s team requests outstanding)\n' "$PR_REQUESTED" "$PR_TEAM_REQUESTS"
+  printf 'Stack:     %s\n' "$PR_STACK"
+  if [ -n "$PR_STACK_NUMBER" ]; then
+    jq -r --argjson pr "$pr" '.[0] | "  base: \(.base.ref)", (.pull_requests[]
+      | "  \(if .number == $pr then "->" else "  " end) #\(.number) \(if .merged_at then "merged" else .state end)\(if .draft then " draft" else "" end) \(.head.ref)")
+    ' "$WORKDIR/stack-$pr.json"
+  fi
+  echo
+  printf 'Files: %s (owned by %s: %s)\n' "$PR_FILES" "$TEAM" "$PR_OWNED"
+  [ "$PR_TRUNCATED" = 1 ] && echo '  WARNING: PR has >= 3000 files; the API list is truncated.'
+  awk -F'\t' '$3 == "1" { print "  owned: " $1 }' "$WORKDIR/owners-$pr"
+  echo 'Owners of changed files:'
+  awk -F'\t' '{ n = split($2, o, " "); for (i = 1; i <= n; i++) c[o[i]]++ } END { for (k in c) printf "  %4d  %s\n", c[k], k }' \
+    "$WORKDIR/owners-$pr" | sort -rn | head -15
+  echo
+  printf 'Our request: %s (%s team requests within %ss)\n' "$PR_REQUESTED_AT" "$PR_BURST" "$BURST_WINDOW"
+  echo 'Timeline (our team, base changes, force pushes, draft toggles; team request bursts collapsed):'
+  jq -rs --arg t "$TEAM_SLUG" '
+    def stamp: .created_at | sub("Z$"; "") | sub("T"; " ");
+    def ours: .team == $t;
+    def team_request: .event == "review_requested" and .team != null;
+    (map(select(team_request) | .created_at[0:16]) | group_by(.) | map({key: .[0], value: length}) | from_entries) as $per_minute
+    | reduce .[] as $e ({seen: {}, lines: []};
+        if ($e | team_request) and ($e | ours | not) then
+          ($e.created_at[0:16]) as $m
+          | if .seen[$m] then . else
+              .seen[$m] = true
+              | .lines += ["  \($e | stamp)  review_requested  \($per_minute[$m]) teams in this minute by \($e.actor)"]
+            end
+        elif ($e.event == "review_requested" or $e.event == "review_request_removed") and ($e.team == null) then .
+        else
+          .lines += ["  \($e | stamp)  \($e.event)  \(if $e.team then "team " + $e.team + " " else "" end)by \($e.actor // "?")\(if ($e | ours) then "  <== " + $t else "" end)"]
+        end)
+    | .lines[]
+  ' "$WORKDIR/timeline-$pr.jsonl"
+}
+
+cmd_remove() {
+  [ ${#PRS[@]} -ge 1 ] || die "remove needs at least one PR"
+  local pr status=0
+  for pr in "${PRS[@]}"; do
+    remove_request "$pr" || status=1
+  done
+  return "$status"
+}
+
+case "$CMD" in
+  detect) cmd_detect ;;
+  inspect) cmd_inspect ;;
+  remove) cmd_remove ;;
+  -h|--help|help) usage ;;
+  *) usage; exit 1 ;;
+esac

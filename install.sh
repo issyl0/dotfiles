@@ -40,6 +40,12 @@ ln -sf $(pwd)/starship.toml $HOME/.config/starship.toml
 mkdir -p $HOME/.config/atuin
 ln -sf $(pwd)/atuin-config.toml $HOME/.config/atuin/config.toml
 
+echo "==> symlinking bin scripts into ~/bin (on PATH via .zshrc)"
+mkdir -p $HOME/bin
+for script in $(pwd)/bin/*; do
+  ln -sf "$script" "$HOME/bin/$(basename "$script")"
+done
+
 if [[ -z "${CODESPACES}" ]]; then
   echo "==> Copilot CLI: instructions and Joplin session export"
   mkdir -p $HOME/.copilot/bin $HOME/.copilot/hooks $HOME/.copilot/logs $HOME/Library/LaunchAgents
