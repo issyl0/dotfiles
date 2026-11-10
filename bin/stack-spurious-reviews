@@ -358,7 +358,7 @@ remove_request() {
     return 0
   fi
 
-  jq -n --arg t "$TEAM_SLUG" '{team_reviewers: [$t]}' |
+  jq -n --arg t "$TEAM_SLUG" '{reviewers: [], team_reviewers: [$t]}' |
     api --method DELETE "repos/$REPO/pulls/$pr/requested_reviewers" --input - >/dev/null
 
   if api "repos/$REPO/pulls/$pr/requested_reviewers" --jq '.teams[].slug' | grep -qixF -- "$TEAM_SLUG"; then
