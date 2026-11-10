@@ -329,32 +329,31 @@ remove_request() {
   local pr="$1"
   analyze_pr "$pr"
   if [ "$PR_REQUESTED" = "no" ]; then
-    log "#$pr: $TEAM isn't requested. Nothing to do."
+    log "#$pr: not requested"
     return 0
   fi
   if [ "$PR_STATE" != "open" ]; then
-    log "#$pr: PR is $PR_STATE. Skipping."
+    log "#$pr: $PR_STATE, skipped"
     return 0
   fi
   case "$PR_VERDICT" in
     LIKELY|POSSIBLE) ;;
     *)
       if [ "$FORCE" != 1 ]; then
-        log "#$pr: verdict $PR_VERDICT (owned files: $PR_OWNED, request: $PR_REQUESTED). Refusing without --force."
+        log "#$pr: $PR_VERDICT, skipped (use --force)"
         return 1
       fi
       ;;
   esac
 
-  printf '#%s %s\n  %s | %s | owned %s/%s files | burst %s | requested %s\n' \
-    "$pr" "$PR_TITLE" "$PR_VERDICT" "$PR_STACK" "$PR_OWNED" "$PR_FILES" "$PR_BURST" "$PR_REQUESTED_AT"
   local comment=""
-  if [ "$COMMENT" = 1 ]; then
-    comment="$(removal_comment)"
-    printf '  comment: %s\n' "$comment"
+  [ "$COMMENT" = 1 ] && comment="$(removal_comment)"
+  if [ "$YES" != 1 ]; then
+    printf '#%s %s (%s, %s, %s/%s owned)\n' \
+      "$pr" "${PR_TITLE:0:60}" "$PR_VERDICT" "$(short_stack)" "$PR_OWNED" "$PR_FILES"
   fi
-  if ! confirm "Remove $TEAM review request from #$pr${comment:+ and comment}?"; then
-    log "#$pr: skipped."
+  if ! confirm "Remove${comment:+ and comment}?"; then
+    log "#$pr: skipped"
     return 0
   fi
 
@@ -362,35 +361,37 @@ remove_request() {
     api --method DELETE "repos/$REPO/pulls/$pr/requested_reviewers" --input - >/dev/null
 
   if api "repos/$REPO/pulls/$pr/requested_reviewers" --jq '.teams[].slug' | grep -qixF -- "$TEAM_SLUG"; then
-    log "#$pr: removal didn't stick. $TEAM is still requested. Not commenting."
+    log "#$pr: still requested after removal, not commenting"
     return 1
   fi
-  log "#$pr: removed $TEAM review request."
 
   if [ -n "$comment" ]; then
     local url
     url="$(jq -n --arg b "$comment" '{body: $b}' |
       api --method POST "repos/$REPO/issues/$pr/comments" --input - --jq .html_url)"
-    log "#$pr: commented: $url"
+    log "#$pr: removed, commented $url"
+  else
+    log "#$pr: removed"
   fi
+}
+
+short_stack() {
+  case "$PR_STACK" in
+    "stack #"*) printf 'stack %s' "$(printf '%s' "$PR_STACK" | sed -E 's/.*\(([^)]*)\).*/\1/')" ;;
+    chain*) printf 'chain' ;;
+    *) printf '%s' "$PR_STACK" ;;
+  esac
 }
 
 cmd_detect() {
   [ ${#PRS[@]} -eq 0 ] || die "detect takes no PR arguments"
-  log "Searching open PRs in $REPO requesting $TEAM..."
   gh pr list --repo "$HOST/$REPO" --state open --limit "$LIMIT" \
     --search "team-review-requested:$TEAM" \
     --json number --jq '.[].number' >"$WORKDIR/candidates"
-  local total
-  total="$(grep -c . "$WORKDIR/candidates" || true)"
-  log "Found $total. Checking files and stacks..."
-  echo
 
-  local fmt='%-8s %-9s %-26s %-7s %-6s %-14s %s\n'
-  # shellcheck disable=SC2059
-  printf "$fmt" PR VERDICT STACK OWNED BURST AUTHOR TITLE
+  local fmt='%-8s %-9s %-11s %-6s %s\n'
+  local pr rows=0
   : >"$WORKDIR/removable"
-  local pr
   [ "$SHOW_ALL" = 1 ] || QUICK=1
   while read -r -u 3 pr; do
     analyze_pr "$pr"
@@ -398,20 +399,18 @@ cmd_detect() {
       continue
     fi
     # shellcheck disable=SC2059
-    printf "$fmt" "#$pr" "$PR_VERDICT" "${PR_STACK:0:26}" "$PR_OWNED/$PR_FILES" "$PR_BURST" \
-      "${PR_AUTHOR:0:14}" "${PR_TITLE:0:60}"
+    [ "$rows" = 0 ] && printf "$fmt" PR VERDICT STACK OWNED TITLE
+    rows=$((rows + 1))
+    # shellcheck disable=SC2059
+    printf "$fmt" "#$pr" "$PR_VERDICT" "$(short_stack)" "$PR_OWNED/$PR_FILES" "${PR_TITLE:0:60}"
     case "$PR_VERDICT" in
       LIKELY|POSSIBLE) echo "$pr" >>"$WORKDIR/removable" ;;
     esac
   done 3<"$WORKDIR/candidates"
-
   QUICK=0
-  local removable
-  removable="$(grep -c . "$WORKDIR/removable" || true)"
-  echo
-  log "$removable LIKELY/POSSIBLE. Inspect with: $(basename "$0") inspect <pr>"
-  if [ "$REMOVE" = 1 ] && [ "$removable" -gt 0 ]; then
-    echo
+
+  [ "$rows" = 0 ] && log "No suspect PRs."
+  if [ "$REMOVE" = 1 ]; then
     while read -r -u 3 pr; do
       remove_request "$pr" || true
     done 3<"$WORKDIR/removable"
